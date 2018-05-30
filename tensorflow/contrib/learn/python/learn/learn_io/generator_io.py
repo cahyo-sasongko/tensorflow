@@ -12,7 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""Methods to allow generator of dict with numpy arrays."""
+"""Methods to allow generator of dict with numpy arrays (deprecated).
+
+This module and all its submodules are deprecated. See
+[contrib/learn/README.md](https://www.tensorflow.org/code/tensorflow/contrib/learn/README.md)
+for migration instructions.
+"""
 
 from __future__ import absolute_import
 from __future__ import division
@@ -22,9 +27,11 @@ from collections import Container
 from types import FunctionType
 from types import GeneratorType
 
-from tensorflow.contrib.learn.python.learn.dataframe.queues import feeding_functions
+from tensorflow.python.estimator.inputs.queues.feeding_functions import _enqueue_data as enqueue_data
+from tensorflow.python.util.deprecation import deprecated
 
 
+@deprecated(None, 'Please use tf.data.')
 def generator_input_fn(x,
                        target_key=None,
                        batch_size=128,
@@ -33,11 +40,12 @@ def generator_input_fn(x,
                        queue_capacity=1000,
                        num_threads=1,
                        pad_value=None):
-  """Returns input function that would dicts of numpy arrays
-       yielded from a generator.
+  """Returns input function that returns dicts of numpy arrays
+     yielded from a generator.
 
-  It is assumed that every dict yielded from the dictionary represents
-  a single sample. The generator should consume a single epoch of the data.
+  It is assumed that every dict of numpy arrays yielded from the dictionary
+  represents a single sample. The generator should consume a single epoch of the
+  data.
 
   This returns a function outputting `features` and `target` based on the dict
   of numpy arrays. The dict `features` has the same keys as an element yielded
@@ -113,7 +121,7 @@ def generator_input_fn(x,
 
   def _generator_input_fn():
     """generator input function."""
-    queue = feeding_functions.enqueue_data(
+    queue = enqueue_data(
         x,
         queue_capacity,
         shuffle=shuffle,

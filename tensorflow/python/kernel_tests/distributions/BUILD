@@ -27,7 +27,7 @@ cuda_py_test(
 
 cuda_py_test(
     name = "util_test",
-    size = "small",
+    size = "medium",
     srcs = ["util_test.py"],
     additional_deps = [
         "//tensorflow/python/ops/distributions",
@@ -41,6 +41,7 @@ cuda_py_test(
         "//tensorflow/python:math_ops",
         "//tensorflow/python:platform_test",
     ],
+    shard_count = 3,
 )
 
 cuda_py_test(
@@ -193,6 +194,7 @@ cuda_py_test(
         "//tensorflow/python:math_ops",
         "//tensorflow/python:platform_test",
     ],
+    tags = ["manual"],  # b/69001419
 )
 
 cuda_py_test(
@@ -278,16 +280,4 @@ cuda_py_test(
         "//tensorflow/python:math_ops",
         "//tensorflow/python:platform_test",
     ],
-)
-
-filegroup(
-    name = "all_files",
-    srcs = glob(
-        ["**/*"],
-        exclude = [
-            "**/METADATA",
-            "**/OWNERS",
-        ],
-    ),
-    visibility = ["//tensorflow:__subpackages__"],
 )

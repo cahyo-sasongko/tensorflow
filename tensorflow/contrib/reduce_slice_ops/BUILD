@@ -61,12 +61,17 @@ tf_custom_op_py_library(
     dso = [
         ":python/ops/_reduce_slice_ops.so",
     ],
+    kernels = [
+        ":reduce_slice_ops_kernels",
+        ":reduce_slice_ops_op_lib",
+    ],
     srcs_version = "PY2AND3",
     visibility = ["//visibility:public"],
     deps = [
         ":reduce_slice_ops",
         "//tensorflow/contrib/util:util_py",
         "//tensorflow/python:framework",
+        "//tensorflow/python:platform",
     ],
 )
 
@@ -95,16 +100,4 @@ tf_cc_test(
         "//tensorflow/core:test_main",
         "//tensorflow/core:testlib",
     ],
-)
-
-filegroup(
-    name = "all_files",
-    srcs = glob(
-        ["**/*"],
-        exclude = [
-            "**/METADATA",
-            "**/OWNERS",
-        ],
-    ),
-    visibility = ["//tensorflow:__subpackages__"],
 )

@@ -26,6 +26,7 @@ limitations under the License.
 #include "tensorflow/core/framework/device_base.h"
 #include "tensorflow/core/framework/kernel_def.pb.h"
 #include "tensorflow/core/framework/node_def.pb.h"
+#include "tensorflow/core/framework/op_def_util.h"
 #include "tensorflow/core/platform/mem.h"
 #include "tensorflow/core/platform/stream_executor_no_cuda.h"
 
@@ -38,10 +39,10 @@ const char* const DEVICE_XLA_GPU = "XLA_GPU";
 
 static Status LaunchOpHasKernelForDevice(const DeviceType& device_type) {
   const OpDef* op_def;
-  TF_RETURN_IF_ERROR(OpRegistry::Global()->LookUpOpDef("_XlaLaunch", &op_def));
+  TF_RETURN_IF_ERROR(OpRegistry::Global()->LookUpOpDef("XlaLaunch", &op_def));
   NodeDef node_def;
   node_def.set_name("_XlaLaunch-op");
-  node_def.set_op("_XlaLaunch");
+  node_def.set_op("XlaLaunch");
   string kernel_class_name;
   TF_RETURN_IF_ERROR(FindKernelDef(device_type, node_def, /*KernelDef*/ nullptr,
                                    &kernel_class_name));
@@ -81,6 +82,11 @@ XlaOpRegistry::~XlaOpRegistry() = default;
                    << device;
       return false;
     }
+  }
+  if (x.compile_time_constant_inputs != y.compile_time_constant_inputs) {
+    LOG(WARNING) << "Registrations of " << x.name
+                 << " have incompatible compile time constant inputs.";
+    return false;
   }
   return true;
 }
@@ -155,7 +161,14 @@ void XlaOpRegistry::RegisterCompilationKernels() {
     const string& op_name = op.first;
     const std::unique_ptr<OpRegistration>& op_registration = op.second;
     const OpDef* op_def;
-    TF_CHECK_OK(op_registry->LookUpOpDef(op_name, &op_def));
+    Status lookup_status = op_registry->LookUpOpDef(op_name, &op_def);
+    if (!lookup_status.ok()) {
+      LOG(ERROR) << lookup_status.error_message();
+      XLA_LOG_LINES(
+          ERROR, "Ops registered: \n" +
+                     dynamic_cast<OpRegistry*>(op_registry)->DebugString(true));
+    }
+    TF_CHECK_OK(lookup_status);
 
     std::unordered_set<string> type_attrs;
     for (const OpDef::AttrDef& attr_def : op_def->attr()) {
@@ -187,22 +200,39 @@ void XlaOpRegistry::RegisterCompilationKernels() {
 
       // Constrain each type attribute to the intersection of:
       // a) the types supported by the backend, and
-      // b) the attribute's type constraints.
-      // TODO(phawkins): it may be necessary to also take the intersection with
-      // the set of types supported by the OpDef.
+      // b) the types allowed by the OpDef, and
+      // c) the type constraints.
       for (const string& type_attr : type_attrs) {
         KernelDef::AttrConstraint* attr_constraint = kdef->add_constraint();
         attr_constraint->set_name(type_attr);
         auto* allowed_values =
             attr_constraint->mutable_allowed_values()->mutable_list();
 
-        auto it = op_registration->type_constraints.find(type_attr);
+        const OpDef::AttrDef& op_def_attr = *FindAttr(type_attr, *op_def);
+        const auto* op_def_allowed_types =
+            op_def_attr.has_allowed_values()
+                ? &op_def_attr.allowed_values().list().type()
+                : nullptr;
+        auto constraint_it = op_registration->type_constraints.find(type_attr);
+        const std::set<DataType>* type_constraints =
+            constraint_it != op_registration->type_constraints.end()
+                ? &constraint_it->second
+                : nullptr;
         for (DataType dtype : backend.second.supported_types) {
-          if (it == op_registration->type_constraints.end() ||
-              (it != op_registration->type_constraints.end() &&
-               it->second.find(dtype) != it->second.end())) {
-            allowed_values->add_type(dtype);
+          // Filter out types that aren't allowed by the OpDef.
+          if (op_def_allowed_types != nullptr &&
+              std::find(op_def_allowed_types->begin(),
+                        op_def_allowed_types->end(),
+                        dtype) == op_def_allowed_types->end()) {
+            continue;
           }
+          // Filter out types based on the type constraints.
+          if (type_constraints != nullptr &&
+              type_constraints->find(dtype) == type_constraints->end()) {
+            continue;
+          }
+          // Passed all the filters, this type is allowed.
+          allowed_values->add_type(dtype);
         }
         if (op_registration->allow_resource_types) {
           allowed_values->add_type(DT_RESOURCE);
@@ -223,7 +253,10 @@ void XlaOpRegistry::RegisterCompilationKernels() {
 }
 
 std::vector<const KernelDef*> XlaOpRegistry::DeviceKernels(
-    const string& compilation_device_name) {
+    const string& compilation_device_name,
+    bool include_compilation_only_kernels) {
+  // Ensure compilation kernels registered.
+  RegisterCompilationKernels();
   std::vector<const KernelDef*> kernels;
   XlaOpRegistry& registry = Instance();
   mutex_lock lock(registry.mutex_);
@@ -236,11 +269,39 @@ std::vector<const KernelDef*> XlaOpRegistry::DeviceKernels(
     // The test in IsCompatible ensures that if there are multiple matching
     // registrations for this op name, they all have the same value of
     // compilation_only, so only the first match needs to be tested.
-    if (!op_iter->second->compilation_only) {
+    if (include_compilation_only_kernels ||
+        !op_iter->second->compilation_only) {
       kernels.push_back(k.get());
     }
   }
   return kernels;
+}
+
+/* static */ const std::unordered_set<string>*
+XlaOpRegistry::CompileTimeConstantInputs(const string& op) {
+  XlaOpRegistry& registry = Instance();
+  mutex_lock lock(registry.mutex_);
+  auto it = registry.ops_.find(op);
+  if (it == registry.ops_.end()) {
+    return nullptr;
+  }
+  return &it->second->compile_time_constant_inputs;
+}
+
+std::vector<string> XlaOpRegistry::BackendNames() {
+  std::vector<string> names;
+  XlaOpRegistry& registry = Instance();
+  mutex_lock lock(registry.mutex_);
+  for (const auto& backend_pair : registry.backends_) {
+    names.push_back(backend_pair.first);
+  }
+  return names;
+}
+
+bool XlaOpRegistry::IsBackendRegistered(const string& name) {
+  XlaOpRegistry& registry = Instance();
+  mutex_lock lock(registry.mutex_);
+  return registry.backends_.find(name) != registry.backends_.end();
 }
 
 XlaOpRegistry& XlaOpRegistry::Instance() {
@@ -250,7 +311,7 @@ XlaOpRegistry& XlaOpRegistry::Instance() {
 
 XlaOpRegistrationBuilder::XlaOpRegistrationBuilder(StringPiece name) {
   registration_.reset(new XlaOpRegistry::OpRegistration);
-  registration_->name = name.ToString();
+  registration_->name = std::string(name);
 }
 
 XlaOpRegistrationBuilder XlaOpRegistrationBuilder::Name(StringPiece name) {
@@ -262,14 +323,14 @@ XlaOpRegistrationBuilder& XlaOpRegistrationBuilder::Device(
     gtl::ArraySlice<StringPiece> devices) {
   registration_->has_device_whitelist = true;
   for (StringPiece device : devices) {
-    registration_->device_whitelist.insert(device.ToString());
+    registration_->device_whitelist.insert(std::string(device));
   }
   return *this;
 }
 
 XlaOpRegistrationBuilder& XlaOpRegistrationBuilder::Device(StringPiece device) {
   registration_->has_device_whitelist = true;
-  registration_->device_whitelist.insert(device.ToString());
+  registration_->device_whitelist.insert(std::string(device));
   return *this;
 }
 
@@ -286,7 +347,7 @@ XlaOpRegistrationBuilder& XlaOpRegistrationBuilder::AllowResourceTypes() {
 XlaOpRegistrationBuilder& XlaOpRegistrationBuilder::TypeConstraint(
     StringPiece attr_name, DataType allowed) {
   std::set<DataType>& types =
-      registration_->type_constraints[attr_name.ToString()];
+      registration_->type_constraints[std::string(attr_name)];
   types.insert(allowed);
   return *this;
 }
@@ -294,10 +355,16 @@ XlaOpRegistrationBuilder& XlaOpRegistrationBuilder::TypeConstraint(
 XlaOpRegistrationBuilder& XlaOpRegistrationBuilder::TypeConstraint(
     StringPiece attr_name, gtl::ArraySlice<DataType> allowed) {
   std::set<DataType>& types =
-      registration_->type_constraints[attr_name.ToString()];
+      registration_->type_constraints[std::string(attr_name)];
   for (DataType t : allowed) {
     types.insert(t);
   }
+  return *this;
+}
+
+XlaOpRegistrationBuilder& XlaOpRegistrationBuilder::CompileTimeConstInput(
+    StringPiece input_name) {
+  registration_->compile_time_constant_inputs.insert(std::string(input_name));
   return *this;
 }
 
@@ -327,38 +394,7 @@ XlaBackendRegistrar::XlaBackendRegistrar(
     StringPiece name, gtl::ArraySlice<DataType> types,
     XlaOpRegistry::BackendOpFilter op_filter) {
   XlaOpRegistry& registry = XlaOpRegistry::Instance();
-  registry.RegisterBackend(name.ToString(), types, op_filter);
+  registry.RegisterBackend(std::string(name), types, op_filter);
 }
-
-bool CpuOpFilter(KernelDef* kdef) {
-  // TODO(b/34339814): implement inverse erf for double types and remove this
-  // workaround.
-  if (kdef->op() == "RandomStandardNormal") {
-    kdef->clear_constraint();
-    // Change the type constraint to permit only DTD_FLOAT.
-    KernelDef::AttrConstraint* attr_constraint = kdef->add_constraint();
-    attr_constraint->set_name("dtype");
-    attr_constraint->mutable_allowed_values()->mutable_list()->add_type(
-        DT_FLOAT);
-    return true;
-  }
-  return true;
-}
-
-REGISTER_XLA_BACKEND(DEVICE_CPU_XLA_JIT, kCpuAllTypes, CpuOpFilter);
-
-bool GpuOpFilter(KernelDef* kdef) {
-  // TODO(b/31361304): The GPU backend does not parallelize PRNG ops, leading to
-  // slow code.
-  // TODO(b/34969189) The implementation of TruncatedNormal generates illegal
-  // code on GPU.
-  if (kdef->op() == "RandomStandardNormal" || kdef->op() == "RandomUniform" ||
-      kdef->op() == "RandomUniformInt" || kdef->op() == "TruncatedNormal") {
-    return false;
-  }
-  return true;
-}
-
-REGISTER_XLA_BACKEND(DEVICE_GPU_XLA_JIT, kGpuAllTypes, GpuOpFilter);
 
 }  // namespace tensorflow

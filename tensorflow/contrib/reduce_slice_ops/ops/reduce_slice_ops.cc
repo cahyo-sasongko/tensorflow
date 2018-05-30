@@ -54,7 +54,7 @@ Status ReduceSliceShapeFn(InferenceContext* c) {
   if (nullptr == _axis) {
     c->set_output(0, c->UnknownShapeOfRank(c->Rank(c->input(0))));
   } else {
-    int64 axis = _axis->scalar<int64>()(0);
+    int64 axis = _axis->scalar<int64>()();
     TF_RETURN_IF_ERROR(c->ReplaceDim(handle, axis, dim_axis, &handle));
     c->set_output(0, handle);
   }
@@ -87,9 +87,9 @@ and 'indices' is [[0,1]
                   [1,1]
                   [0,2]],
 
-the the output will be [[ 1, 2, 3]
-                        [ 0, 0, 0]
-                        [41,52,63]].
+the output will be [[ 1, 2, 3]
+                    [ 0, 0, 0]
+                    [41,52,63]].
 ```
 
 The data must be at least rank 1. The indices must be of shape (?,2) where the
@@ -132,9 +132,9 @@ and 'indices' is [[0,1]
                   [1,1]
                   [0,2]],
 
-the the output will be [[ 1,  2,  3]
-                        [ 1,  1,  1]
-                        [40,100,180]].
+the output will be [[ 1,  2,  3]
+                    [ 1,  1,  1]
+                    [40,100,180]].
 ```
 
 The data must be at least rank 1. The indices can be of shape (?,2) where the
@@ -189,9 +189,9 @@ and 'indices' is [[0,1]
                   [1,1]
                   [0,2]],
 
-the the output will be [[          1,         20,          3]
-                        [ -BIG_VALUE, -BIG_VALUE, -BIG_VALUE]
-                        [        400,         20,         60]].
+the output will be [[          1,         20,          3]
+                    [ -BIG_VALUE, -BIG_VALUE, -BIG_VALUE]
+                    [        400,         20,         60]].
 ```
 
 The data must be at least rank 1. The indices can be of shape (?,2) where the
@@ -246,9 +246,9 @@ and 'indices' is [[0,1]
                   [1,1]
                   [0,2]],
 
-the the output will be [[          1,         20,          3]
-                        [ +BIG_VALUE, +BIG_VALUE, +BIG_VALUE]
-                        [          1,          5,          3]].
+the output will be [[          1,         20,          3]
+                    [ +BIG_VALUE, +BIG_VALUE, +BIG_VALUE]
+                    [          1,          5,          3]].
 ```
 
 The data must be at least rank 1. The indices can be of shape (?,2) where the

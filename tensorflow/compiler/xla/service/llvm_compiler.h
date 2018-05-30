@@ -42,14 +42,37 @@ class LLVMCompiler : public Compiler {
   void SetPreOptimizationHook(ModuleHook hook) {
     CHECK(!user_pre_optimization_hook_)
         << "Pre-optimization hook is already set";
+    CHECK(hook) << "hook cannot be null";
     user_pre_optimization_hook_ = hook;
   }
+
+  void RemovePreOptimizationHook() { user_pre_optimization_hook_ = nullptr; }
 
   void SetPostOptimizationHook(ModuleHook hook) {
     CHECK(!user_post_optimization_hook_)
         << "Post-optimization hook is already set";
+    CHECK(hook) << "hook cannot be null";
     user_post_optimization_hook_ = hook;
   }
+
+  void RemovePostOptimizationHook() { user_post_optimization_hook_ = nullptr; }
+
+  // Bring in
+  //   StatusOr<std::unique_ptr<Executable>> RunBackend(
+  //       std::unique_ptr<HloModule> module,
+  //       se::StreamExecutor* stream_exec,
+  //       DeviceMemoryAllocator* device_allocator)
+  //   StatusOr<std::unique_ptr<HloModule>> RunHloPasses(
+  //       std::unique_ptr<HloModule> module,
+  //       se::StreamExecutor* stream_exec,
+  //       DeviceMemoryAllocator* device_allocator)
+  using Compiler::RunBackend;
+  using Compiler::RunHloPasses;
+
+  StatusOr<std::vector<std::unique_ptr<Executable>>> Compile(
+      std::vector<std::unique_ptr<HloModule>> modules,
+      std::vector<std::vector<se::StreamExecutor*>> stream_execs,
+      DeviceMemoryAllocator* device_allocator) override;
 
  protected:
   ModuleHook user_pre_optimization_hook_;

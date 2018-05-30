@@ -19,11 +19,11 @@ from __future__ import division
 from __future__ import print_function
 
 import numpy as np
-import unittest
 
 from tensorflow.contrib.reduce_slice_ops.python.ops import reduce_slice_ops
 from tensorflow.python.framework.test_util import TensorFlowTestCase
 from tensorflow.python.platform import googletest
+
 
 class ReduceSliceTest(TensorFlowTestCase):
 

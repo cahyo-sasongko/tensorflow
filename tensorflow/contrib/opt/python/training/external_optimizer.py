@@ -367,6 +367,7 @@ class ScipyOptimizerInterface(ExternalOptimizerInterface):
       loss, gradient = loss_grad_func(x)
       return loss, gradient.astype('float64')
 
+    optimizer_kwargs = dict(optimizer_kwargs.items())
     method = optimizer_kwargs.pop('method', self._DEFAULT_METHOD)
 
     constraints = []
@@ -396,10 +397,6 @@ class ScipyOptimizerInterface(ExternalOptimizerInterface):
             'automatically and cannot be injected manually'.format(kwarg))
 
     minimize_kwargs.update(optimizer_kwargs)
-    if method == 'SLSQP':
-      # SLSQP doesn't support step callbacks. Obviate associated warning
-      # message.
-      del minimize_kwargs['callback']
 
     import scipy.optimize  # pylint: disable=g-import-not-at-top
     result = scipy.optimize.minimize(*minimize_args, **minimize_kwargs)

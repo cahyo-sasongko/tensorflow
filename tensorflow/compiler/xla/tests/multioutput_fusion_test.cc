@@ -19,7 +19,6 @@ limitations under the License.
 #include <new>
 #include <utility>
 
-#include "tensorflow/compiler/xla/client/computation_builder.h"
 #include "tensorflow/compiler/xla/client/local_client.h"
 #include "tensorflow/compiler/xla/literal_util.h"
 #include "tensorflow/compiler/xla/primitive_util.h"
@@ -28,6 +27,7 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/hlo_instruction.h"
 #include "tensorflow/compiler/xla/service/hlo_module.h"
 #include "tensorflow/compiler/xla/service/hlo_opcode.h"
+#include "tensorflow/compiler/xla/service/hlo_runner.h"
 #include "tensorflow/compiler/xla/shape_util.h"
 #include "tensorflow/compiler/xla/tests/client_library_test_base.h"
 #include "tensorflow/compiler/xla/tests/hlo_test_base.h"
@@ -35,6 +35,7 @@ limitations under the License.
 #include "tensorflow/compiler/xla/tests/test_macros.h"
 #include "tensorflow/compiler/xla/tests/test_utils.h"
 #include "tensorflow/compiler/xla/xla_data.pb.h"
+#include "tensorflow/core/lib/core/status_test_util.h"
 #include "tensorflow/core/lib/gtl/array_slice.h"
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/platform/protobuf.h"
@@ -42,17 +43,15 @@ limitations under the License.
 #include "tensorflow/core/platform/test_benchmark.h"
 #include "tensorflow/core/platform/types.h"
 
-using tensorflow::gtl::ArraySlice;
-
 namespace xla {
 namespace {
 
-class MultiOutputFusionTest : public HloTestBase {
- public:
-  ErrorSpec error_spec_{0.0001, 1e-2};
+using ::tensorflow::gtl::ArraySlice;
 
+class MultiOutputFusionTest : public HloTestBase {
  protected:
-  MultiOutputFusionTest() {}
+  MultiOutputFusionTest() { error_spec_ = ErrorSpec{0.0001, 1e-2}; }
+
   void RunTest2D(bool manual_fusion, int64 size) {
     auto builder = HloComputation::Builder(TestName());
     auto hlo_module = CreateNewModule();
@@ -69,7 +68,7 @@ class MultiOutputFusionTest : public HloTestBase {
         elem_shape0, HloOpcode::kAdd, param0, const0));
 
     HloInstruction* broadcast = builder.AddInstruction(
-        HloInstruction::CreateBroadcast(elem_shape2, add1, {0, 1}));
+        HloInstruction::CreateBroadcast(elem_shape2, add1, {}));
 
     auto param1 = builder.AddInstruction(
         HloInstruction::CreateParameter(1, elem_shape2, "1"));
@@ -78,8 +77,11 @@ class MultiOutputFusionTest : public HloTestBase {
         elem_shape2, HloOpcode::kAdd, broadcast, param1));
     HloInstruction* sub = builder.AddInstruction(HloInstruction::CreateBinary(
         elem_shape2, HloOpcode::kSubtract, param1, broadcast));
+    DotDimensionNumbers dot_dnums;
+    dot_dnums.add_lhs_contracting_dimensions(1);
+    dot_dnums.add_rhs_contracting_dimensions(0);
     HloInstruction* dot = builder.AddInstruction(
-        HloInstruction::CreateBinary(elem_shape2, HloOpcode::kDot, sub, add2));
+        HloInstruction::CreateDot(elem_shape2, sub, add2, dot_dnums));
     auto computation = hlo_module->AddEntryComputation(builder.Build(dot));
 
     if (manual_fusion) {
@@ -98,15 +100,14 @@ class MultiOutputFusionTest : public HloTestBase {
           nullptr);
     }
 
-    Literal input;
-    input.PopulateWithValue<float>(2.5f, {size, size});
-    auto p1 = TransferToDevice(input);
-    auto p0 = TransferToDevice(*Literal::CreateR0<float>(-9.0f));
+    Literal arg1(ShapeUtil::MakeShape(F32, {size, size}));
+    arg1.PopulateWithValue<float>(2.5f);
 
-    Literal expect;
-    expect.PopulateWithValue<float>(size * 1.5f * 3.5f, {size, size});
-    auto actual = ExecuteAndTransfer(std::move(hlo_module), {p0, p1});
-    LiteralTestUtil::ExpectNear(expect, *actual, error_spec_);
+    Literal expect(ShapeUtil::MakeShape(F32, {size, size}));
+    expect.PopulateWithValue<float>(size * 1.5f * 3.5f);
+    auto actual = ExecuteAndTransfer(
+        std::move(hlo_module), {Literal::CreateR0<float>(-9.0f).get(), &arg1});
+    EXPECT_TRUE(LiteralTestUtil::Near(expect, *actual, error_spec_));
   }
 
   void RunTest1D(bool manual_fusion, int size) {
@@ -135,8 +136,11 @@ class MultiOutputFusionTest : public HloTestBase {
     HloInstruction* reshape =
         builder.AddInstruction(HloInstruction::CreateReshape(
             ShapeUtil::MakeShape(F32, {size, 1}), add));
-    HloInstruction* dot = builder.AddInstruction(HloInstruction::CreateBinary(
-        ShapeUtil::MakeShape(F32, {}), HloOpcode::kDot, sub, reshape));
+    DotDimensionNumbers dot_dnums;
+    dot_dnums.add_lhs_contracting_dimensions(0);
+    dot_dnums.add_rhs_contracting_dimensions(0);
+    HloInstruction* dot = builder.AddInstruction(HloInstruction::CreateDot(
+        ShapeUtil::MakeShape(F32, {1}), sub, reshape, dot_dnums));
     auto computation = hlo_module->AddEntryComputation(builder.Build(dot));
 
     if (manual_fusion) {
@@ -156,15 +160,14 @@ class MultiOutputFusionTest : public HloTestBase {
                nullptr);
     }
 
-    Literal input0, input1;
-    input0.PopulateWithValue<float>(2.5f, {size});
-    input1.PopulateWithValue<double>(1, {size});
-    auto p0 = TransferToDevice(input0);
-    auto p1 = TransferToDevice(input1);
+    Literal input0(ShapeUtil::MakeShape(F32, {size}));
+    input0.PopulateWithValue(2.5f);
+    Literal input1(ShapeUtil::MakeShape(F64, {size}));
+    input1.PopulateWithValue(1.);
 
-    Literal expect = *Literal::CreateR0<float>(size * 1.5f * 3.5f);
-    auto actual = ExecuteAndTransfer(std::move(hlo_module), {p0, p1});
-    LiteralTestUtil::ExpectNear(expect, *actual, error_spec_);
+    Literal expect = std::move(*Literal::CreateR1<float>({size * 1.5f * 3.5f}));
+    auto actual = ExecuteAndTransfer(std::move(hlo_module), {&input0, &input1});
+    EXPECT_TRUE(LiteralTestUtil::Near(expect, *actual, error_spec_));
   }
 };
 
@@ -173,6 +176,102 @@ XLA_TEST_F(MultiOutputFusionTest, 2DFusion) { RunTest2D(true, 5); }
 XLA_TEST_F(MultiOutputFusionTest, 2DFusionSize129) { RunTest2D(true, 129); }
 XLA_TEST_F(MultiOutputFusionTest, DiffentTypesNoFusion) { RunTest1D(false, 8); }
 XLA_TEST_F(MultiOutputFusionTest, DiffentTypesFusion) { RunTest1D(true, 8); }
+
+XLA_TEST_F(MultiOutputFusionTest, FusionNodeIsRoot) {
+  const char* testcase = R"(
+    HloModule m
+
+    fused_computation {
+      x.param_0 = (((s32[]), f32[]), (f32[], s32[])) parameter(0)
+      gte.3 = ((s32[]), f32[]) get-tuple-element(x.param_0), index=0
+      gte.2 = (s32[]) get-tuple-element(gte.3), index=0
+      gte.4 = s32[] get-tuple-element(gte.2), index=0
+      copy = s32[] copy(gte.4)
+      ROOT tuple = (s32[]) tuple(copy)
+    }
+
+    ENTRY thing.v3 {
+      x = (((s32[]), f32[]), (f32[], s32[])) parameter(0)
+      ROOT fusion = (s32[]) fusion(x), kind=kLoop, calls=fused_computation
+    }
+  )";
+  auto module =
+      HloRunner::CreateModuleFromString(testcase, GetDebugOptionsForTest())
+          .ValueOrDie();
+  auto param = Literal::MakeTupleOwned(
+      Literal::MakeTupleOwned(
+          Literal::MakeTupleOwned(Literal::CreateR0<int32>(42)),
+          Literal::CreateR0<float>(1.0)),
+      Literal::MakeTupleOwned(Literal::CreateR0<float>(3.0),
+                              Literal::CreateR0<int32>(4)));
+  TF_ASSERT_OK_AND_ASSIGN(auto result,
+                          Execute(std::move(module), {param.get()}));
+  EXPECT_TRUE(LiteralTestUtil::Equal(
+      *result, *Literal::MakeTupleOwned(Literal::CreateR0<int32>(42))));
+}
+
+XLA_TEST_F(MultiOutputFusionTest, MultiOutputLoopFusion) {
+  const char* testcase = R"(
+    HloModule m
+
+    fused_computation {
+      p = f32[4] parameter(0)
+      multiply = f32[4] multiply(p, p)
+      less-than = pred[4] less-than(p, multiply)
+      ROOT tuple = (pred[4], f32[4]) tuple(less-than, multiply)
+    }
+
+    ENTRY PredFloatMOF {
+      p0 = f32[4] parameter(0)
+      fusion = (pred[4], f32[4]) fusion(p0), kind=kLoop, calls=fused_computation
+      gte0 = pred[4] get-tuple-element(fusion), index=0
+      gte1 = f32[4] get-tuple-element(fusion), index=1
+      const = f32[4] constant({0, 0, 0, 0})
+      ROOT select = f32[4] select(gte0, gte1, const)
+    })";
+  auto module =
+      HloRunner::CreateModuleFromString(testcase, GetDebugOptionsForTest())
+          .ValueOrDie();
+  auto param = Literal::CreateR1<float>({1.0, 2.0, 3.0, -1.0});
+  TF_ASSERT_OK_AND_ASSIGN(auto result,
+                          Execute(std::move(module), {param.get()}));
+  EXPECT_TRUE(LiteralTestUtil::Equal(
+      *result, *Literal::CreateR1<float>({0.0, 4.0, 9.0, 1.0})));
+}
+
+XLA_TEST_F(MultiOutputFusionTest, MultiOutputLoopFeedingMap) {
+  const char* testcase = R"(
+    HloModule m
+
+    fused_computation {
+      p = f32[] parameter(0)
+      multiply = f32[] multiply(p, p)
+      less-than = pred[] less-than(p, multiply)
+      ROOT tuple = (pred[], f32[]) tuple(less-than, multiply)
+    }
+
+    map_computation {
+      p0 = f32[] parameter(0)
+      fusion = (pred[], f32[]) fusion(p0), kind=kLoop, calls=fused_computation
+      gte0 = pred[] get-tuple-element(fusion), index=0
+      gte1 = f32[] get-tuple-element(fusion), index=1
+      const = f32[] constant(0)
+      ROOT select = f32[] select(gte0, gte1, const)
+    }
+
+    ENTRY MapMOF {
+      p1 = f32[3] parameter(0)
+      ROOT map = f32[3] map(p1), to_apply=map_computation
+    })";
+  auto module =
+      HloRunner::CreateModuleFromString(testcase, GetDebugOptionsForTest())
+          .ValueOrDie();
+  auto param = Literal::CreateR1<float>({1.0, 2.0, 3.0});
+  TF_ASSERT_OK_AND_ASSIGN(auto result,
+                          Execute(std::move(module), {param.get()}));
+  EXPECT_TRUE(LiteralTestUtil::Equal(
+      *result, *Literal::CreateR1<float>({0.0, 4.0, 9.0})));
+}
 
 }  // namespace
 }  // namespace xla

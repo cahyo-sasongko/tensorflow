@@ -28,11 +28,14 @@ from tensorflow.python.framework import ops
 from tensorflow.python.framework import tensor_shape
 from tensorflow.python.ops import array_ops
 from tensorflow.python.saved_model import signature_constants
+from tensorflow.python.saved_model import tag_constants
 from tensorflow.python.training import monitored_session
 from tensorflow.python.training import session_run_hook
 from tensorflow.python.util import nest
+from tensorflow.python.util.tf_export import tf_export
 
 
+@tf_export('estimator.ModeKeys')
 class ModeKeys(object):
   """Standard names for model modes.
 
@@ -51,12 +54,20 @@ class ModeKeys(object):
 LOSS_METRIC_KEY = 'loss'
 AVERAGE_LOSS_METRIC_KEY = 'average_loss'
 
+# Mapping of the modes to appropriate tag_constants that are used for saving.
+EXPORT_TAG_MAP = {
+    ModeKeys.PREDICT: [tag_constants.SERVING],
+    ModeKeys.TRAIN: [tag_constants.TRAINING],
+    ModeKeys.EVAL: [tag_constants.EVAL],
+}
 
+
+@tf_export('estimator.EstimatorSpec')
 class EstimatorSpec(
     collections.namedtuple('EstimatorSpec', [
-        'predictions', 'loss', 'train_op', 'eval_metric_ops',
-        'export_outputs', 'training_chief_hooks', 'training_hooks',
-        'scaffold', 'evaluation_hooks'
+        'mode', 'predictions', 'loss', 'train_op', 'eval_metric_ops',
+        'export_outputs', 'training_chief_hooks', 'training_hooks', 'scaffold',
+        'evaluation_hooks', 'prediction_hooks'
     ])):
   """Ops and objects returned from a `model_fn` and passed to an `Estimator`.
 
@@ -73,10 +84,12 @@ class EstimatorSpec(
               training_chief_hooks=None,
               training_hooks=None,
               scaffold=None,
-              evaluation_hooks=None):
+              evaluation_hooks=None,
+              prediction_hooks=None):
     """Creates a validated `EstimatorSpec` instance.
 
     Depending on the value of `mode`, different arguments are required. Namely
+
     * For `mode == ModeKeys.TRAIN`: required fields are `loss` and `train_op`.
     * For `mode == ModeKeys.EVAL`: required field is `loss`.
     * For `mode == ModeKeys.PREDICT`: required fields are `predictions`.
@@ -131,7 +144,10 @@ class EstimatorSpec(
       train_op: Op for the training step.
       eval_metric_ops: Dict of metric results keyed by name. The values of the
         dict are the results of calling a metric function, namely a
-        `(metric_tensor, update_op)` tuple.
+        `(metric_tensor, update_op)` tuple. `metric_tensor` should be evaluated
+        without any impact on state (typically is a pure computation results
+        based on variables.). For example, it should not trigger the `update_op`
+        or requires any input fetching.
       export_outputs: Describes the output signatures to be exported to
         `SavedModel` and used during serving.
         A dict `{name: output}` where:
@@ -150,6 +166,8 @@ class EstimatorSpec(
         initialization, saver, and more to be used in training.
       evaluation_hooks: Iterable of `tf.train.SessionRunHook` objects to
         run during evaluation.
+      prediction_hooks: Iterable of `tf.train.SessionRunHook` objects to
+        run during predictions.
 
     Returns:
       A validated `EstimatorSpec` object.
@@ -278,7 +296,10 @@ class EstimatorSpec(
     training_chief_hooks = tuple(training_chief_hooks or [])
     training_hooks = tuple(training_hooks or [])
     evaluation_hooks = tuple(evaluation_hooks or [])
-    for hook in training_hooks + training_chief_hooks + evaluation_hooks:
+    prediction_hooks = tuple(prediction_hooks or [])
+
+    for hook in (training_hooks + training_chief_hooks + evaluation_hooks +
+                 prediction_hooks):
       if not isinstance(hook, session_run_hook.SessionRunHook):
         raise TypeError(
             'All hooks must be SessionRunHook instances, given: {}'.format(
@@ -292,6 +313,7 @@ class EstimatorSpec(
 
     return super(EstimatorSpec, cls).__new__(
         cls,
+        mode=mode,
         predictions=predictions,
         loss=loss,
         train_op=train_op,
@@ -300,7 +322,67 @@ class EstimatorSpec(
         training_chief_hooks=training_chief_hooks,
         training_hooks=training_hooks,
         scaffold=scaffold,
-        evaluation_hooks=evaluation_hooks)
+        evaluation_hooks=evaluation_hooks,
+        prediction_hooks=prediction_hooks)
+
+  def _replace(self, **kwds):
+    """Return a new EstimatorSpec replacing specified fields with new values."""
+    if 'mode' in kwds:
+      if self.mode != kwds['mode']:
+        raise ValueError('mode of EstimatorSpec cannot be changed.')
+    new_fields = map(kwds.pop, self._fields, list(self))
+    return EstimatorSpec(*new_fields)
+
+
+class _TPUEstimatorSpec(collections.namedtuple('TPUEstimatorSpec', [
+    'mode',
+    'predictions',
+    'loss',
+    'train_op',
+    'eval_metrics',
+    'export_outputs',
+    'scaffold_fn',
+    'host_call'])):
+  """Ops and objects returned from a `model_fn` and passed to `TPUEstimator`.
+
+  This is a simplified implementation of `tf.contrib.tpu.EstimatorSpec`. See
+  tensorflow/contrib/tpu/python/tpu/tpu_estimator.py for more detailed
+  documentation.
+  """
+
+  def __new__(cls,
+              mode,
+              predictions=None,
+              loss=None,
+              train_op=None,
+              eval_metrics=None,
+              export_outputs=None,
+              scaffold_fn=None,
+              host_call=None):
+    """Creates a `_TPUEstimatorSpec` instance."""
+    return super(_TPUEstimatorSpec, cls).__new__(cls,
+                                                 mode=mode,
+                                                 predictions=predictions,
+                                                 loss=loss,
+                                                 train_op=train_op,
+                                                 eval_metrics=eval_metrics,
+                                                 export_outputs=export_outputs,
+                                                 scaffold_fn=scaffold_fn,
+                                                 host_call=host_call)
+
+  def as_estimator_spec(self):
+    """Creates an equivalent `EstimatorSpec` used by CPU train/eval."""
+    if not self.eval_metrics:
+      eval_metric_ops = None
+    else:
+      metric_fn, tensors = self.eval_metrics
+      eval_metric_ops = metric_fn(**tensors)
+    return EstimatorSpec(mode=self.mode,
+                         predictions=self.predictions,
+                         loss=self.loss,
+                         train_op=self.train_op,
+                         eval_metric_ops=eval_metric_ops,
+                         export_outputs=self.export_outputs)
 
 
 def _check_is_tensor_or_operation(x, name):

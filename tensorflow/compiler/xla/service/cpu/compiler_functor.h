@@ -31,19 +31,10 @@ namespace cpu {
 // Orc JIT compile layer.
 class CompilerFunctor {
  public:
-  // Describes the set of vector intrinsics available to the generated code.
-  struct VectorIntrinsics {
-    bool sse_intrinsics;
-    bool avx_intrinsics;
-  };
-
-  // Returns a VectorIntrinsics where all intrinsics are available.
-  static VectorIntrinsics AllIntrinsics();
-
   explicit CompilerFunctor(
       llvm::TargetMachine* target_machine, const Disassembler* disassembler,
       int opt_level, bool optimize_for_size, bool enable_fast_math,
-      const VectorIntrinsics& available_intrinsics,
+      bool disable_expensive_passes,
       LLVMCompiler::ModuleHook pre_optimization_hook = nullptr,
       LLVMCompiler::ModuleHook post_optimization_hook = nullptr)
       : target_machine_(target_machine),
@@ -51,12 +42,12 @@ class CompilerFunctor {
         opt_level_(opt_level),
         optimize_for_size_(optimize_for_size),
         enable_fast_math_(enable_fast_math),
-        available_intrinsics_(available_intrinsics),
+        disable_expensive_passes_(disable_expensive_passes),
         pre_optimization_hook_(pre_optimization_hook),
         post_optimization_hook_(post_optimization_hook) {}
 
   // Compile a Module to an ObjectFile.
-  llvm::object::OwningBinary<llvm::object::ObjectFile> operator()(
+  std::unique_ptr<llvm::MemoryBuffer> operator()(
       llvm::Module& module) const;  // NOLINT
 
  private:
@@ -74,7 +65,7 @@ class CompilerFunctor {
   const unsigned opt_level_;
   const bool optimize_for_size_;
   const bool enable_fast_math_;
-  const VectorIntrinsics available_intrinsics_;
+  const bool disable_expensive_passes_;
   LLVMCompiler::ModuleHook pre_optimization_hook_;
   LLVMCompiler::ModuleHook post_optimization_hook_;
 };
